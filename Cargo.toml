@@ -1,0 +1,33 @@
+[package]
+name = "model-downloader"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Download open-weights reasoning models (GGUF) to an external drive on Windows"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+indicatif = "0.17"
+futures-util = "0.3"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console", "Win32_System_Registry", "Win32_System_SystemInformation", "Win32_System_WindowsProgramming"] }
+dialoguer = { version = "0.11", default-features = false }
+console = "0.15"
+strsim = "0.11"
+sha2 = "0.10"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[build-dependencies]
+embed-resource = "3.0.12"
+
+# Checksumming multi-GB files is painfully slow unoptimized; keep debug builds usable.
+[profile.dev.package.sha2]
+opt-level = 3

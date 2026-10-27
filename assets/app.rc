@@ -1,0 +1,2 @@
+// Windows resources compiled into the .exe by build.rs.
+1 ICON "icon.ico"

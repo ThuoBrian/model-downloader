@@ -1,0 +1,20 @@
+# Build output
+/target
+
+# AI assistant files (kept local, never committed)
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Windows
+Thumbs.db
+desktop.ini
+
+# macOS (from copying the project off a Mac)
+._*
+.DS_Store

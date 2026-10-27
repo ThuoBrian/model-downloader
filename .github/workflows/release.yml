@@ -1,0 +1,49 @@
+# Publishes model-downloader.exe to GitHub Releases when a version tag is pushed:
+#
+#   git tag v0.1.0
+#   git push origin v0.1.0
+#
+# The tag must match the version in Cargo.toml.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the tag matches Cargo.toml
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ("v$version" -ne "${{ github.ref_name }}") {
+            throw "Tag ${{ github.ref_name }} doesn't match Cargo.toml version $version"
+          }
+
+      - run: cargo test
+      - run: cargo build --release
+
+      # A fixed file name keeps the "latest" download link stable:
+      # https://github.com/<owner>/<repo>/releases/latest/download/model-downloader.exe
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item target/release/model-downloader.exe model-downloader.exe
+          $hash = (Get-FileHash model-downloader.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  model-downloader.exe" | Out-File -Encoding ascii model-downloader.exe.sha256
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            model-downloader.exe
+            model-downloader.exe.sha256
+          generate_release_notes: true
