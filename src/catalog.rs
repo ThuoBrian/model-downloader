@@ -172,15 +172,92 @@ static CATALOG: [ModelEntry; 13] = [
     },
 ];
 
+/// Shown before anyone browses or downloads an abliterated model.
+pub const ABLITERATED_NOTICE: &str = "Abliterated models have their safety refusals removed, so they can produce \
+     harmful or false content without pushing back. They are third-party modifications of the original \
+     model and may reason slightly worse. You are responsible for how you use them.";
+
+/// Uncensored variants, kept out of `catalog()` so they only appear when asked for.
+pub fn abliterated() -> &'static [ModelEntry] {
+    &ABLITERATED
+}
+
+static ABLITERATED: [ModelEntry; 3] = [
+    ModelEntry {
+        id: "qwen3-8b-abliterated",
+        display_name: "Qwen3-8B (abliterated)",
+        description: "mlabonne's abliterated Qwen3-8B: Qwen3 8B with thinking mode and safety refusals removed.",
+        hf_repo: Some("bartowski/mlabonne_Qwen3-8B-abliterated-GGUF"),
+        ollama_tag: None,
+        size_gb_q4: 5.0,
+        params_b: 8.0,
+        reasoning_strength: ReasoningStrength::Dedicated,
+    },
+    ModelEntry {
+        id: "qwen3-14b-abliterated",
+        display_name: "Qwen3-14B (abliterated)",
+        description: "huihui-ai's abliterated Qwen3-14B: Qwen3 14B with thinking mode and safety refusals removed.",
+        hf_repo: Some("bartowski/huihui-ai_Qwen3-14B-abliterated-GGUF"),
+        ollama_tag: None,
+        size_gb_q4: 9.0,
+        params_b: 14.0,
+        reasoning_strength: ReasoningStrength::Dedicated,
+    },
+    ModelEntry {
+        id: "gpt-oss-20b-abliterated",
+        display_name: "GPT-OSS-20B (abliterated)",
+        description: "huihui-ai's abliterated GPT-OSS-20B: OpenAI's 20B MoE model with safety refusals removed.",
+        hf_repo: Some("bartowski/huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated-GGUF"),
+        ollama_tag: None,
+        size_gb_q4: 11.7,
+        params_b: 20.0,
+        reasoning_strength: ReasoningStrength::Dedicated,
+    },
+];
+
+/// Curated and live abliterated models alike have "abliterated" in their ID.
+pub fn is_abliterated(model: &ModelEntry) -> bool {
+    model.id.contains("abliterated")
+}
+
+/// A catalog entry for a repo found by searching Hugging Face at runtime.
+/// `ModelEntry` holds `&'static str`s, so the strings are leaked; that's a
+/// few hundred bytes per search, freed when the program exits.
+pub fn live_entry(repo: &str, q4_bytes: u64) -> &'static ModelEntry {
+    let name = repo.rsplit('/').next().unwrap_or(repo);
+    let name = name.strip_suffix("-GGUF").unwrap_or(name);
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    Box::leak(Box::new(ModelEntry {
+        id: leak(name.to_lowercase()),
+        display_name: leak(name.to_string()),
+        description: "Found on Hugging Face; not checked by model-downloader.",
+        hf_repo: Some(leak(repo.to_string())),
+        ollama_tag: None,
+        size_gb_q4: q4_bytes as f64 / 1e9,
+        params_b: params_from_name(name).unwrap_or(0.0),
+        reasoning_strength: ReasoningStrength::Moderate,
+    }))
+}
+
+/// "mlabonne_Qwen3-8B-abliterated" → 8.0. Tokens like "A3B" (active
+/// parameters) or "BF16" don't parse, so the first real size wins.
+fn params_from_name(name: &str) -> Option<f64> {
+    name.split(['-', '_'])
+        .find_map(|t| t.strip_suffix(['B', 'b'])?.parse::<f64>().ok())
+}
+
+fn all_models() -> impl Iterator<Item = &'static ModelEntry> {
+    catalog().iter().chain(abliterated())
+}
+
 pub fn find_by_id(id: &str) -> Option<&'static ModelEntry> {
-    catalog().iter().find(|m| m.id.eq_ignore_ascii_case(id))
+    all_models().find(|m| m.id.eq_ignore_ascii_case(id))
 }
 
 /// Up to three catalog IDs closest to a mistyped one, best match first.
 pub fn suggest(query: &str) -> Vec<&'static str> {
     let q = query.to_lowercase();
-    let mut scored: Vec<(f64, &'static str)> = catalog()
-        .iter()
+    let mut scored: Vec<(f64, &'static str)> = all_models()
         .map(|m| {
             let name = m.display_name.to_lowercase();
             let similarity = strsim::jaro_winkler(&q, m.id).max(strsim::jaro_winkler(&q, &name));
@@ -267,7 +344,7 @@ mod tests {
 
     #[test]
     fn every_model_has_at_least_one_source() {
-        for m in catalog() {
+        for m in all_models() {
             assert!(
                 m.hf_repo.is_some() || m.ollama_tag.is_some(),
                 "Model {} has no download source",
@@ -286,7 +363,7 @@ mod tests {
     #[test]
     fn suggests_close_ids() {
         assert_eq!(suggest("qwen-14b").first(), Some(&"qwen3-14b"));
-        assert_eq!(suggest("gpt-oss").len(), 2);
+        assert_eq!(suggest("gpt-oss").len(), 3, "both sizes plus the abliterated one");
         assert!(suggest("zzz").is_empty());
     }
 
@@ -310,8 +387,38 @@ mod tests {
 
     #[test]
     fn all_ids_are_unique() {
-        let ids: Vec<_> = catalog().iter().map(|m| m.id).collect();
+        let ids: Vec<_> = all_models().map(|m| m.id).collect();
         let unique: std::collections::HashSet<_> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len(), "duplicate model IDs in catalog");
+    }
+
+    #[test]
+    fn abliterated_models_stay_out_of_the_normal_lists() {
+        assert!(catalog().iter().chain(by_size()).all(|m| !is_abliterated(m)));
+        assert!(abliterated().iter().all(is_abliterated));
+    }
+
+    #[test]
+    fn abliterated_models_can_be_found_by_id() {
+        let m = find_by_id("qwen3-8b-abliterated").expect("found");
+        assert!(is_abliterated(m));
+        assert!(!is_abliterated(find_by_id("qwen3-8b").unwrap()));
+    }
+
+    #[test]
+    fn reads_parameter_count_from_repo_names() {
+        assert_eq!(params_from_name("mlabonne_Qwen3-8B-abliterated"), Some(8.0));
+        assert_eq!(params_from_name("Qwen2.5-Coder-1.5B-Instruct-abliterated"), Some(1.5));
+        assert_eq!(params_from_name("Qwen_Qwen3-30B-A3B"), Some(30.0));
+        assert_eq!(params_from_name("huihui-ai_Huihui-gpt-oss-20b-BF16-abliterated"), Some(20.0));
+        assert_eq!(params_from_name("huihui-ai_Qwen3-Coder-Next-abliterated"), None);
+    }
+
+    #[test]
+    fn live_entries_are_marked_abliterated() {
+        let m = live_entry("bartowski/mlabonne_gemma-3-4b-it-abliterated-GGUF", 2_500_000_000);
+        assert_eq!(m.id, "mlabonne_gemma-3-4b-it-abliterated");
+        assert_eq!(m.params_b, 4.0);
+        assert!(is_abliterated(m));
     }
 }

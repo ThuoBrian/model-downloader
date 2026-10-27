@@ -113,6 +113,50 @@ pub async fn hf_downloads(client: &reqwest::Client, repo: &str) -> Result<u64> {
     Ok(info.downloads)
 }
 
+#[derive(Deserialize)]
+struct HfSearchHit {
+    id: String,
+    downloads: u64,
+}
+
+/// An abliterated GGUF repo found by searching Hugging Face, not from the catalog.
+pub struct LiveModel {
+    pub repo: String,
+    pub q4_bytes: u64,
+    /// Downloads over the last 30 days.
+    pub downloads: u64,
+}
+
+/// bartowski's most downloaded abliterated GGUF repos that have a
+/// default-quant file, so every one returned can be downloaded.
+pub async fn hf_abliterated(client: &reqwest::Client) -> Result<Vec<LiveModel>> {
+    let url = format!(
+        "{}/api/models?author=bartowski&search=abliterated&sort=downloads&direction=-1&limit=20",
+        HF_BASE
+    );
+    let hits: Vec<HfSearchHit> = client
+        .get(&url)
+        .send()
+        .await
+        .context("Failed to reach Hugging Face API")?
+        .error_for_status()?
+        .json()
+        .await
+        .context("Failed to parse Hugging Face search results")?;
+
+    let found = futures_util::future::join_all(hits.into_iter().map(|hit| async move {
+        let files = resolve_hf_repo(client, &hit.id, crate::catalog::DEFAULT_QUANT).await.ok()?;
+        let q4_bytes = files.iter().map(|f| f.size).sum::<Option<u64>>()?;
+        Some(LiveModel {
+            repo: hit.id,
+            q4_bytes,
+            downloads: hit.downloads,
+        })
+    }))
+    .await;
+    Ok(found.into_iter().flatten().collect())
+}
+
 /// HF repos store GGUF files on "main" with names like `<model>-Q4_K_M.gguf`.
 /// Quants too large for one file live in a `<model>-Q8_0/` directory as split
 /// parts. We match the quant exactly (so Q6_K never picks Q6_K_L) and return
@@ -121,7 +165,10 @@ async fn resolve_hf(client: &reqwest::Client, model: &ModelEntry, quant: &str) -
     let repo = model
         .hf_repo
         .ok_or_else(|| anyhow::anyhow!("Model {} has no Hugging Face repo", model.id))?;
+    resolve_hf_repo(client, repo, quant).await
+}
 
+async fn resolve_hf_repo(client: &reqwest::Client, repo: &str, quant: &str) -> Result<Vec<RemoteFile>> {
     let entries = hf_list(client, repo, "").await?;
 
     let quant_lower = quant.to_lowercase();
@@ -523,6 +570,16 @@ mod tests {
         let path = std::env::temp_dir().join(format!("model-downloader-{tag}-{}", std::process::id()));
         std::fs::write(&path, contents).unwrap();
         path
+    }
+
+    /// Talks to Hugging Face, so it's skipped by default:
+    /// `cargo test -- --ignored finds_abliterated_models_online`
+    #[tokio::test]
+    #[ignore]
+    async fn finds_abliterated_models_online() {
+        let found = hf_abliterated(&crate::http_client().unwrap()).await.unwrap();
+        assert!(found.len() >= 5, "found {}", found.len());
+        assert!(found.iter().all(|m| m.q4_bytes > 0));
     }
 
     #[test]

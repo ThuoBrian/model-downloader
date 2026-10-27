@@ -35,6 +35,7 @@ pub async fn run() -> Result<()> {
                 "Download a model",
                 "Browse models",
                 "Most downloaded models",
+                "Abliterated models (uncensored)",
                 "Show drives",
                 "Quit",
             ])
@@ -43,11 +44,8 @@ pub async fn run() -> Result<()> {
 
         match choice {
             Some(0) => {
-                if let Some(req) = download_wizard(&hw)? {
-                    // Show the error and stay in the menu rather than exiting.
-                    if let Err(err) = crate::run_download(req, false).await {
-                        ui::print_error(&err);
-                    }
+                if let Some(model) = pick_model("Which model? (the best fit for your PC is selected)", &hw)? {
+                    download(model, &hw).await?;
                 }
             }
             Some(1) => browse(&hw)?,
@@ -56,7 +54,8 @@ pub async fn run() -> Result<()> {
                     ui::print_error(&err);
                 }
             }
-            Some(3) => crate::cmd_volumes()?,
+            Some(3) => abliterated_menu(&hw).await?,
+            Some(4) => crate::cmd_volumes()?,
             _ => return Ok(()),
         }
     }
@@ -64,10 +63,21 @@ pub async fn run() -> Result<()> {
 
 /// "Qwen3-14B                       14B   ~9.4 GB   ⚠ tight fit   Dedicated reasoning"
 fn model_row(m: &ModelEntry, hw: &Hardware) -> String {
+    // Names of models found on Hugging Face can be long; keep the columns lined up.
+    let name: String = if m.display_name.chars().count() > 30 {
+        m.display_name.chars().take(29).chain(['…']).collect()
+    } else {
+        m.display_name.to_string()
+    };
+    let params = if m.params_b > 0.0 {
+        format!("{:.0}B", m.params_b)
+    } else {
+        "?".to_string()
+    };
     format!(
         "{:<30} {:>5} {:>9}   {}  {}",
-        m.display_name,
-        format!("{:.0}B", m.params_b),
+        name,
+        params,
         format!("~{:.1} GB", m.size_gb_q4),
         hw.fit(m.estimated_bytes(catalog::DEFAULT_QUANT)).styled(),
         m.reasoning_strength.label()
@@ -157,12 +167,84 @@ async fn most_downloaded(hw: &Hardware) -> Result<()> {
     }
 }
 
-/// Walk through model → source → quant → drive. `None` means the user backed out.
-fn download_wizard(hw: &Hardware) -> Result<Option<DownloadRequest>> {
-    let Some(model) = pick_model("Which model? (the best fit for your PC is selected)", hw)? else {
-        return Ok(None);
-    };
+/// The curated abliterated models, plus a way to search Hugging Face for more.
+async fn abliterated_menu(hw: &Hardware) -> Result<()> {
+    println!();
+    ui::warn(catalog::ABLITERATED_NOTICE);
 
+    let mut models: Vec<&ModelEntry> = catalog::abliterated().iter().collect();
+    models.sort_by(|a, b| a.size_gb_q4.total_cmp(&b.size_gb_q4));
+    let mut rows: Vec<String> = models.iter().map(|m| model_row(m, hw)).collect();
+    rows.push(format!("{} Check for more on Hugging Face…", ui::ARROW));
+
+    loop {
+        let choice = Select::with_theme(&ui::theme())
+            .with_prompt("Which abliterated model? (Esc to go back)")
+            .items(&rows)
+            .default(best_fit(&models, hw))
+            .interact_opt()?;
+        match choice {
+            Some(i) if i < models.len() => download(models[i], hw).await?,
+            Some(_) => {
+                if let Err(err) = more_abliterated(hw).await {
+                    ui::print_error(&err);
+                }
+            }
+            None => return Ok(()),
+        }
+    }
+}
+
+/// bartowski's most downloaded abliterated models that aren't in the curated list.
+async fn more_abliterated(hw: &Hardware) -> Result<()> {
+    let client = crate::http_client()?;
+    let spin = ui::spinner("Searching Hugging Face for abliterated models…");
+    let found = downloader::hf_abliterated(&client).await;
+    spin.finish_and_clear();
+
+    let curated: Vec<&str> = catalog::abliterated().iter().filter_map(|m| m.hf_repo).collect();
+    let live: Vec<(&ModelEntry, u64)> = found?
+        .into_iter()
+        .filter(|l| !curated.contains(&l.repo.as_str()))
+        .map(|l| (catalog::live_entry(&l.repo, l.q4_bytes), l.downloads))
+        .collect();
+    if live.is_empty() {
+        bail!("No other abliterated models found on Hugging Face.");
+    }
+
+    ui::warn("These aren't checked by model-downloader. Many aren't reasoning models, and quality varies.");
+    let rows: Vec<String> = live
+        .iter()
+        .map(|(m, n)| format!("{}  {:>7} / month", model_row(m, hw), ui::format_count(*n)))
+        .collect();
+
+    loop {
+        let Some(i) = Select::with_theme(&ui::theme())
+            .with_prompt("Most downloaded on Hugging Face (Esc to go back)")
+            .items(&rows)
+            .default(0)
+            .max_length(14)
+            .interact_opt()?
+        else {
+            return Ok(());
+        };
+        download(live[i].0, hw).await?;
+    }
+}
+
+/// Ask the remaining questions for `model`, then download it. A failed
+/// download is shown and the user stays in the menu rather than exiting.
+async fn download(model: &'static ModelEntry, hw: &Hardware) -> Result<()> {
+    if let Some(req) = download_wizard(model, hw)?
+        && let Err(err) = crate::run_download(req, false).await
+    {
+        ui::print_error(&err);
+    }
+    Ok(())
+}
+
+/// Walk through source → quant → drive. `None` means the user backed out.
+fn download_wizard(model: &'static ModelEntry, hw: &Hardware) -> Result<Option<DownloadRequest>> {
     let Some(source) = pick_source(model)? else {
         return Ok(None);
     };
