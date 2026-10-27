@@ -39,6 +39,9 @@ enum Commands {
         /// Filter by reasoning strength
         #[arg(short, long)]
         filter: Option<ReasoningStrength>,
+        /// List the abliterated (uncensored) models instead
+        #[arg(long)]
+        abliterated: bool,
     },
     /// Show details for a specific model
     Info {
@@ -81,8 +84,8 @@ async fn main() -> ExitCode {
             let _ = Cli::command().print_help();
             Ok(ExitCode::SUCCESS)
         }
-        Some(Commands::List { filter }) => {
-            cmd_list(filter);
+        Some(Commands::List { filter, abliterated }) => {
+            cmd_list(filter, abliterated);
             Ok(ExitCode::SUCCESS)
         }
         Some(Commands::Info { model_id }) => catalog::lookup(&model_id).map(|m| {
@@ -121,8 +124,15 @@ fn styled_strength(s: ReasoningStrength, width: usize) -> StyledObject<String> {
     }
 }
 
-fn cmd_list(filter: Option<ReasoningStrength>) {
-    let filtered: Vec<&ModelEntry> = catalog::by_size()
+fn cmd_list(filter: Option<ReasoningStrength>, abliterated: bool) {
+    let models = if abliterated {
+        let mut models: Vec<&ModelEntry> = catalog::abliterated().iter().collect();
+        models.sort_by(|a, b| a.size_gb_q4.total_cmp(&b.size_gb_q4));
+        models
+    } else {
+        catalog::by_size()
+    };
+    let filtered: Vec<&ModelEntry> = models
         .into_iter()
         .filter(|m| filter.is_none_or(|f| m.reasoning_strength == f))
         .collect();
@@ -133,7 +143,12 @@ fn cmd_list(filter: Option<ReasoningStrength>) {
     }
 
     let hw = hardware::detect();
-    ui::heading("Curated reasoning models (GGUF)");
+    if abliterated {
+        ui::heading("Abliterated models (uncensored, GGUF)");
+        ui::warn(catalog::ABLITERATED_NOTICE);
+    } else {
+        ui::heading("Curated reasoning models (GGUF)");
+    }
     ui::kv("Your PC", hw.summary());
     println!();
     println!(
@@ -166,7 +181,9 @@ fn cmd_list(filter: Option<ReasoningStrength>) {
 pub(crate) fn print_info(model: &ModelEntry, show_commands: bool) {
     ui::heading(model.display_name);
     ui::kv("ID", style(model.id).cyan().bold());
-    ui::kv("Parameters", format!("{:.0}B", model.params_b));
+    if model.params_b > 0.0 {
+        ui::kv("Parameters", format!("{:.0}B", model.params_b));
+    }
     ui::kv("Reasoning", styled_strength(model.reasoning_strength, 0));
     ui::kv("Q4_K_M size", format!("~{:.1} GB", model.size_gb_q4));
     if let Some(repo) = model.hf_repo {
@@ -178,6 +195,10 @@ pub(crate) fn print_info(model: &ModelEntry, show_commands: bool) {
     ui::kv("Quants", catalog::available_quants().join(", "));
 
     println!("\n  {}\n", model.description);
+    if catalog::is_abliterated(model) {
+        ui::warn(catalog::ABLITERATED_NOTICE);
+        println!();
+    }
 
     if show_commands {
         ui::hint("Download it:");
@@ -355,6 +376,11 @@ pub(crate) async fn run_download(req: DownloadRequest, assume_yes: bool) -> Resu
         ui::kv("Your PC", format!("{} {}", fit.styled(), style(fit.explain(&hw)).dim()));
     }
     println!();
+    // The menu already showed this, but the CLI path never does.
+    if catalog::is_abliterated(model) {
+        ui::warn(catalog::ABLITERATED_NOTICE);
+        println!();
+    }
 
     // FAT32 caps files at 4 GB; the write would fail partway through.
     if volume.is_fat32() && files.iter().any(|f| f.size.is_none_or(|s| s > volumes::FAT32_MAX_FILE)) {

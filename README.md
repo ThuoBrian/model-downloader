@@ -49,6 +49,20 @@ To see what other people are using, choose **Most downloaded models** from the m
 
 Sizes are for the default quality setting (Q4_K_M). Higher settings like Q8_0 are better but bigger. As a rough guide, a 16 GB laptop runs models up to about 9 GB well.
 
+## Abliterated models
+
+Abliterated models are versions with their safety refusals removed, so they answer questions the original would decline. That also means they can produce harmful or false content without pushing back, and they may reason slightly worse than the original. They're third-party modifications, and you're responsible for how you use them.
+
+They're kept out of the normal lists. To see them, choose **Abliterated models (uncensored)** from the menu, or run `model-downloader list --abliterated`.
+
+| Model ID | Size |
+|---|---|
+| qwen3-8b-abliterated | 5.0 GB |
+| qwen3-14b-abliterated | 9.0 GB |
+| gpt-oss-20b-abliterated | 11.7 GB |
+
+These come from Hugging Face only. The same menu has **Check for more on Hugging Face**, which lists other popular abliterated models. Those aren't checked by this app: many aren't reasoning models, and quality varies.
+
 ## Drive format
 
 The drive needs to be exFAT or NTFS. FAT32 can't hold files over 4 GB, and almost every model is bigger than that, so the app won't use a FAT32 drive. To check, right-click the drive in File Explorer and choose Properties.
@@ -59,6 +73,7 @@ You can also run it from PowerShell:
 
 ```powershell
 model-downloader list                          # all models, rated for your PC
+model-downloader list --abliterated            # the uncensored models
 model-downloader info qwen3-8b                 # details on one model
 model-downloader volumes                       # drives you can save to
 model-downloader download qwen3-8b             # download (asks first)
