@@ -66,6 +66,15 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
+/// "950", "127.7k", "1.2M".
+pub fn format_count(n: u64) -> String {
+    match n {
+        0..1_000 => n.to_string(),
+        1_000..1_000_000 => format!("{:.1}k", n as f64 / 1e3),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
+}
+
 /// Free space coloured by how comfortable it is for multi-GB models.
 pub fn free_space(bytes: u64) -> StyledObject<String> {
     let gb = bytes as f64 / GIB;
@@ -243,6 +252,13 @@ pub async fn interrupted() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn formats_count() {
+        assert_eq!(format_count(950), "950");
+        assert_eq!(format_count(127_725), "127.7k");
+        assert_eq!(format_count(1_234_567), "1.2M");
+    }
 
     #[test]
     fn formats_size() {

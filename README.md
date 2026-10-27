@@ -27,6 +27,8 @@ Every download is checked against the checksum Hugging Face or Ollama publishes.
 
 The app marks each model for your PC: ✓ runs well, ⚠ tight fit, or ✗ too big. If you're not sure, take the one it selects for you. Bigger models are smarter but need more memory and disk space.
 
+To see what other people are using, choose **Most downloaded models** from the menu. It ranks the models below by Hugging Face downloads over the last month. Some of the most popular ones are too big for many PCs, so the app warns you if you pick one that won't run well on yours.
+
 | Model ID | Size |
 |---|---|
 | dsr1-distill-qwen-7b | 4.7 GB |

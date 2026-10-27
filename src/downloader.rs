@@ -92,6 +92,27 @@ async fn hf_list(client: &reqwest::Client, repo: &str, subdir: &str) -> Result<V
         .context("Failed to parse Hugging Face file listing")
 }
 
+#[derive(Deserialize)]
+struct HfModelInfo {
+    /// Downloads over the last 30 days.
+    downloads: u64,
+}
+
+/// How many times a Hugging Face repo was downloaded in the last 30 days.
+pub async fn hf_downloads(client: &reqwest::Client, repo: &str) -> Result<u64> {
+    let url = format!("{}/api/models/{}", HF_BASE, repo);
+    let info: HfModelInfo = client
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to reach Hugging Face API: {}", url))?
+        .error_for_status()?
+        .json()
+        .await
+        .context("Failed to parse Hugging Face model info")?;
+    Ok(info.downloads)
+}
+
 /// HF repos store GGUF files on "main" with names like `<model>-Q4_K_M.gguf`.
 /// Quants too large for one file live in a `<model>-Q8_0/` directory as split
 /// parts. We match the quant exactly (so Q6_K never picks Q6_K_L) and return

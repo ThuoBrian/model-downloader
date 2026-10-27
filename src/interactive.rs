@@ -1,12 +1,13 @@
 //! Arrow-key menus shown when the program runs with no arguments
 //! (including when the .exe is double-clicked).
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use console::style;
 use dialoguer::Select;
+use futures_util::future::join_all;
 
 use crate::catalog::{self, ModelEntry};
-use crate::downloader::Source;
+use crate::downloader::{self, Source};
 use crate::hardware::{self, Fit, Hardware};
 use crate::volumes::{self, Volume};
 use crate::{DownloadRequest, ui};
@@ -30,7 +31,13 @@ pub async fn run() -> Result<()> {
         println!();
         let choice = Select::with_theme(&ui::theme())
             .with_prompt("What would you like to do?")
-            .items(&["Download a model", "Browse models", "Show drives", "Quit"])
+            .items(&[
+                "Download a model",
+                "Browse models",
+                "Most downloaded models",
+                "Show drives",
+                "Quit",
+            ])
             .default(0)
             .interact_opt()?;
 
@@ -44,7 +51,12 @@ pub async fn run() -> Result<()> {
                 }
             }
             Some(1) => browse(&hw)?,
-            Some(2) => crate::cmd_volumes()?,
+            Some(2) => {
+                if let Err(err) = most_downloaded(&hw).await {
+                    ui::print_error(&err);
+                }
+            }
+            Some(3) => crate::cmd_volumes()?,
             _ => return Ok(()),
         }
     }
@@ -87,6 +99,62 @@ fn browse(hw: &Hardware) -> Result<()> {
         crate::print_info(model, false);
     }
     Ok(())
+}
+
+/// Catalog models ranked by Hugging Face downloads over the last 30 days.
+/// Popular models are often bigger than this PC can run, so picking one
+/// that won't fit well shows a warning before its details.
+async fn most_downloaded(hw: &Hardware) -> Result<()> {
+    let client = &crate::http_client()?;
+    let spin = ui::spinner("Getting download counts from Hugging Face…");
+    let counts = join_all(catalog::catalog().iter().map(|m| async move {
+        let repo = m.hf_repo?;
+        downloader::hf_downloads(client, repo).await.ok().map(|n| (m, n))
+    }))
+    .await;
+    spin.finish_and_clear();
+
+    let mut ranked: Vec<(&ModelEntry, u64)> = counts.into_iter().flatten().collect();
+    if ranked.is_empty() {
+        bail!("Couldn't get download counts from Hugging Face. Check your internet connection.");
+    }
+    ranked.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+
+    let rows: Vec<String> = ranked
+        .iter()
+        .map(|(m, n)| {
+            format!(
+                "{:<30} {:>8} / month   {}",
+                m.display_name,
+                ui::format_count(*n),
+                hw.fit(m.estimated_bytes(catalog::DEFAULT_QUANT)).styled()
+            )
+        })
+        .collect();
+
+    loop {
+        let Some(i) = Select::with_theme(&ui::theme())
+            .with_prompt("Most downloaded on Hugging Face (Esc to go back)")
+            .items(&rows)
+            .default(0)
+            .max_length(14)
+            .interact_opt()?
+        else {
+            return Ok(());
+        };
+
+        let model = ranked[i].0;
+        let fit = hw.fit(model.estimated_bytes(catalog::DEFAULT_QUANT));
+        if matches!(fit, Fit::Tight | Fit::TooBig) {
+            ui::warn(format!(
+                "{} is popular, but it's a {} {}. A smaller model may suit this PC better.",
+                model.display_name,
+                fit.label(),
+                fit.explain(hw)
+            ));
+        }
+        crate::print_info(model, false);
+    }
 }
 
 /// Walk through model → source → quant → drive. `None` means the user backed out.
