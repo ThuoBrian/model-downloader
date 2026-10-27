@@ -283,6 +283,13 @@ async fn cmd_download(
     })
 }
 
+pub(crate) fn http_client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .user_agent(concat!("model-downloader/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .build()?)
+}
+
 /// Resolve, summarise, confirm, then download — shared by the CLI and the menu.
 pub(crate) async fn run_download(req: DownloadRequest, assume_yes: bool) -> Result<Outcome> {
     let DownloadRequest {
@@ -292,10 +299,7 @@ pub(crate) async fn run_download(req: DownloadRequest, assume_yes: bool) -> Resu
         volume,
     } = req;
 
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("model-downloader/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .build()?;
+    let client = http_client()?;
 
     println!();
     let spin = ui::spinner(format!("Contacting {}…", source.label()));
