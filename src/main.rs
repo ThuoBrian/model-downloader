@@ -391,6 +391,16 @@ pub(crate) async fn run_download(req: DownloadRequest, assume_yes: bool) -> Resu
         let too_big = fit == Some(hardware::Fit::TooBig);
         if too_big {
             ui::warn("This model is too big for this PC. A smaller model or quant will work better.");
+        } else if fit == Some(hardware::Fit::Tight) {
+            ui::warn("This model will only just fit. Expect it to run slowly, and close other apps first.");
+        }
+        if let Some(t) = total
+            && hw.short_on_free_memory(t)
+        {
+            ui::warn(format!(
+                "Only {} of memory is free right now. Close other apps, like browsers, before running this model.",
+                ui::format_size(hw.free_ram_bytes)
+            ));
         }
         if !ui::confirm(&prompt, !too_big)? {
             ui::hint("Cancelled. Nothing was downloaded.");
