@@ -24,6 +24,8 @@ pub struct Gpu {
 #[derive(Debug, Clone)]
 pub struct Hardware {
     pub ram_bytes: u64,
+    /// RAM not in use by other apps when the program started.
+    pub free_ram_bytes: u64,
     pub gpu: Option<Gpu>,
 }
 
@@ -76,12 +78,12 @@ impl Fit {
 }
 
 impl Hardware {
-    /// Rough rule of thumb: a model needs about its file size plus 20% and
-    /// 1 GB for context and the runtime. Windows needs roughly a quarter of RAM.
+    /// Rated against total memory, since other apps can be closed.
+    /// Windows needs roughly a quarter of RAM.
     pub fn fit(&self, model_bytes: u64) -> Fit {
-        let need = model_bytes as f64 * 1.2 + GIB;
+        let need = memory_needed(model_bytes);
         let ram = self.ram_bytes as f64;
-        let vram = self.gpu.as_ref().map_or(0, |g| g.vram_bytes) as f64;
+        let vram = self.vram();
         if vram > 0.0 && need <= vram {
             Fit::Fast
         } else if need <= ram * 0.75 + vram {
@@ -93,9 +95,24 @@ impl Hardware {
         }
     }
 
-    /// "16 GB RAM · NVIDIA GeForce RTX 3060 (12 GB)"
+    /// True when the model would fit on this PC, but not in the memory that
+    /// other apps have left free right now.
+    pub fn short_on_free_memory(&self, model_bytes: u64) -> bool {
+        let need = memory_needed(model_bytes);
+        need <= self.ram_bytes as f64 + self.vram() && need > self.free_ram_bytes as f64 + self.vram()
+    }
+
+    fn vram(&self) -> f64 {
+        self.gpu.as_ref().map_or(0, |g| g.vram_bytes) as f64
+    }
+
+    /// "16 GB RAM (6 GB free) · NVIDIA GeForce RTX 3060 (12 GB)"
     pub fn summary(&self) -> String {
-        let mut s = format!("{:.0} GB RAM", self.ram_bytes as f64 / GIB);
+        let mut s = format!(
+            "{:.0} GB RAM ({:.0} GB free)",
+            self.ram_bytes as f64 / GIB,
+            self.free_ram_bytes as f64 / GIB
+        );
         if let Some(gpu) = &self.gpu {
             if gpu.vram_bytes > 0 {
                 s += &format!(" · {} ({:.0} GB)", gpu.name, gpu.vram_bytes as f64 / GIB);
@@ -107,14 +124,23 @@ impl Hardware {
     }
 }
 
+/// Rough rule of thumb: a model needs about its file size plus 20% and
+/// 1 GB for context and the runtime.
+fn memory_needed(model_bytes: u64) -> f64 {
+    model_bytes as f64 * 1.2 + GIB
+}
+
 pub fn detect() -> Hardware {
+    let (ram_bytes, free_ram_bytes) = ram();
     Hardware {
-        ram_bytes: total_ram(),
+        ram_bytes,
+        free_ram_bytes,
         gpu: detect_gpu(),
     }
 }
 
-fn total_ram() -> u64 {
+/// (total, free) physical memory in bytes.
+fn ram() -> (u64, u64) {
     let mut status = MEMORYSTATUSEX {
         dwLength: size_of::<MEMORYSTATUSEX>() as u32,
         dwMemoryLoad: 0,
@@ -128,7 +154,7 @@ fn total_ram() -> u64 {
     };
     // SAFETY: status is a valid MEMORYSTATUSEX with dwLength set, as the call requires.
     let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
-    if ok != 0 { status.ullTotalPhys } else { 0 }
+    if ok != 0 { (status.ullTotalPhys, status.ullAvailPhys) } else { (0, 0) }
 }
 
 /// The adapter with the most dedicated memory. Discrete cards record it as
@@ -195,6 +221,7 @@ mod tests {
     fn pc(ram_gb: u64, vram_gb: u64) -> Hardware {
         Hardware {
             ram_bytes: ram_gb * GB,
+            free_ram_bytes: ram_gb * GB,
             gpu: Some(Gpu {
                 name: "Test GPU".into(),
                 vram_bytes: vram_gb * GB,
@@ -218,7 +245,20 @@ mod tests {
     }
 
     #[test]
+    fn warns_when_other_apps_use_the_memory() {
+        let hw = Hardware {
+            free_ram_bytes: 5 * GB,
+            ..pc(16, 0)
+        };
+        assert!(!hw.short_on_free_memory(3 * GB)); // fits in what's free
+        assert!(hw.short_on_free_memory(5 * GB)); // fits once apps are closed
+        assert!(!hw.short_on_free_memory(20 * GB)); // too big either way; fit() covers it
+    }
+
+    #[test]
     fn detects_some_ram() {
-        assert!(detect().ram_bytes > GB, "every test machine has over 1 GB of RAM");
+        let hw = detect();
+        assert!(hw.ram_bytes > GB, "every test machine has over 1 GB of RAM");
+        assert!(hw.free_ram_bytes <= hw.ram_bytes);
     }
 }
