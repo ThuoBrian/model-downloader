@@ -113,6 +113,21 @@ model-downloader download qwen3-8b --volume MyDrive --yes
 model-downloader download qwen3-8b --dir ~/AI
 ```
 
+## Release notes
+
+### v0.5.0
+
+The app now runs on Macs as well as Windows.
+
+- Works on Apple Silicon (M1 and later) and Intel Macs. It's one download for both.
+- Install it from Terminal with one command (see [Mac](#mac) above). Run the same command again to update.
+- The app rates models against your Mac's memory. On Apple Silicon, the graphics chip shares that memory, and the app shows the chip name, for example "Apple M2 Pro (shares system memory)".
+- Save to "This Mac" (your home folder), any external drive, or any folder. Pick a drive by name with `--volume MyDrive`.
+- Drives a Mac can't write to, such as NTFS drives, aren't listed. The app suggests exFAT or APFS instead.
+- You can type `~` in the folder prompt, for example `~/AI`.
+
+Nothing changes on Windows.
+
 ## Building it yourself
 
 ### Windows
