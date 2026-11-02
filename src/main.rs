@@ -1,5 +1,5 @@
-#[cfg(not(windows))]
-compile_error!("model-downloader is a Windows tool; build it on Windows (x86_64-pc-windows-msvc).");
+#[cfg(not(any(windows, target_os = "macos")))]
+compile_error!("model-downloader runs on Windows and macOS; build it on one of those.");
 
 mod catalog;
 mod downloader;
@@ -24,7 +24,7 @@ use volumes::Volume;
     name = "model-downloader",
     about = "Download open-weights reasoning models (GGUF) to any drive or folder",
     long_about = "Download open-weights reasoning models (GGUF) to any drive or folder.\n\n\
-                  Run with no arguments (or double-click the .exe) for an interactive menu.",
+                  Run with no arguments (or double-click the .exe on Windows) for an interactive menu.",
     version,
 )]
 struct Cli {
@@ -61,7 +61,7 @@ enum Commands {
         /// Ollama tags come in a fixed quant. [default: Q4_K_M]
         #[arg(short, long)]
         quant: Option<String>,
-        /// Drive to download to, by letter (E:) or label (skips the picker)
+        /// Drive to download to, by letter (E:) or name (skips the picker)
         #[arg(short, long)]
         volume: Option<String>,
         /// Folder to download to instead of a drive (created if missing)
@@ -149,13 +149,13 @@ fn cmd_list(filter: Option<ReasoningStrength>, abliterated: bool) {
     } else {
         ui::heading("Curated reasoning models (GGUF)");
     }
-    ui::kv("Your PC", hw.summary());
+    ui::kv(&format!("Your {}", ui::COMPUTER), hw.summary());
     println!();
     println!(
         "  {}",
         style(format!(
-            "{:<24} {:<20} {:>6} {:>9}  On your PC",
-            "ID", "Strength", "Params", "Q4 size"
+            "{:<24} {:<20} {:>6} {:>9}  On your {}",
+            "ID", "Strength", "Params", "Q4 size", ui::COMPUTER
         ))
         .dim()
     );
@@ -216,11 +216,11 @@ pub(crate) fn print_info(model: &ModelEntry, show_commands: bool) {
 pub(crate) fn cmd_volumes() -> Result<()> {
     let vols = volumes::detect_volumes()?;
     volumes::print_volumes(&vols);
-    ui::hint("To use any other folder: model-downloader download <id> --dir D:\\Models");
+    ui::hint(format!("To use any other folder: model-downloader download <id> --dir {}", volumes::EXAMPLE_DIR));
     println!();
     if vols.iter().any(|v| v.is_fat32()) {
         ui::warn("FAT32 drives can't hold files over 4 GB, which rules out most models.");
-        ui::hint("Reformat them as exFAT or NTFS to use them.");
+        ui::hint(format!("Reformat them as {} to use them.", volumes::BIG_FILE_FORMATS));
         println!();
     }
 
@@ -373,7 +373,7 @@ pub(crate) async fn run_download(req: DownloadRequest, assume_yes: bool) -> Resu
     let hw = hardware::detect();
     let fit = total.map(|t| hw.fit(t));
     if let Some(fit) = fit {
-        ui::kv("Your PC", format!("{} {}", fit.styled(), style(fit.explain(&hw)).dim()));
+        ui::kv(&format!("Your {}", ui::COMPUTER), format!("{} {}", fit.styled(), style(fit.explain(&hw)).dim()));
     }
     println!();
     // The menu already showed this, but the CLI path never does.
@@ -386,8 +386,9 @@ pub(crate) async fn run_download(req: DownloadRequest, assume_yes: bool) -> Resu
     if volume.is_fat32() && files.iter().any(|f| f.size.is_none_or(|s| s > volumes::FAT32_MAX_FILE)) {
         bail!(
             "{} is formatted as FAT32, which can't hold files over 4 GB.\n\
-             Reformat it as exFAT or NTFS, or choose another drive.",
-            volume.name()
+             Reformat it as {}, or choose another drive.",
+            volume.name(),
+            volumes::BIG_FILE_FORMATS
         );
     }
 
@@ -416,7 +417,10 @@ pub(crate) async fn run_download(req: DownloadRequest, assume_yes: bool) -> Resu
         // start a download that will be wasted.
         let too_big = fit == Some(hardware::Fit::TooBig);
         if too_big {
-            ui::warn("This model is too big for this PC. A smaller model or quant will work better.");
+            ui::warn(format!(
+                "This model is too big for this {}. A smaller model or quant will work better.",
+                ui::COMPUTER
+            ));
         } else if fit == Some(hardware::Fit::Tight) {
             ui::warn("This model will only just fit. Expect it to run slowly, and close other apps first.");
         }
