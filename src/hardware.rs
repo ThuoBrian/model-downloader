@@ -1,18 +1,15 @@
-//! What this PC can run: total RAM and dedicated graphics memory, and a rough
+//! What this computer can run: total RAM and dedicated graphics memory, and a rough
 //! rating of whether a model of a given size will run on it.
 
 use console::{StyledObject, style};
-use windows_sys::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_QWORD, RRF_RT_REG_SZ, RegGetValueW};
-use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
 use crate::ui;
-use crate::volumes::{from_wide, wide};
+
+#[cfg_attr(windows, path = "hardware/windows.rs")]
+#[cfg_attr(target_os = "macos", path = "hardware/macos.rs")]
+mod sys;
 
 const GIB: f64 = 1_073_741_824.0;
-
-/// Display adapters ("Display" device class) in the registry.
-const DISPLAY_CLASS: &str =
-    r"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}";
 
 #[derive(Debug, Clone)]
 pub struct Gpu {
@@ -79,7 +76,7 @@ impl Fit {
 
 impl Hardware {
     /// Rated against total memory, since other apps can be closed.
-    /// Windows needs roughly a quarter of RAM.
+    /// The operating system needs roughly a quarter of RAM.
     pub fn fit(&self, model_bytes: u64) -> Fit {
         let need = memory_needed(model_bytes);
         let ram = self.ram_bytes as f64;
@@ -131,85 +128,12 @@ fn memory_needed(model_bytes: u64) -> f64 {
 }
 
 pub fn detect() -> Hardware {
-    let (ram_bytes, free_ram_bytes) = ram();
+    let (ram_bytes, free_ram_bytes) = sys::ram();
     Hardware {
         ram_bytes,
         free_ram_bytes,
-        gpu: detect_gpu(),
+        gpu: sys::detect_gpu(),
     }
-}
-
-/// (total, free) physical memory in bytes.
-fn ram() -> (u64, u64) {
-    let mut status = MEMORYSTATUSEX {
-        dwLength: size_of::<MEMORYSTATUSEX>() as u32,
-        dwMemoryLoad: 0,
-        ullTotalPhys: 0,
-        ullAvailPhys: 0,
-        ullTotalPageFile: 0,
-        ullAvailPageFile: 0,
-        ullTotalVirtual: 0,
-        ullAvailVirtual: 0,
-        ullAvailExtendedVirtual: 0,
-    };
-    // SAFETY: status is a valid MEMORYSTATUSEX with dwLength set, as the call requires.
-    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
-    if ok != 0 { (status.ullTotalPhys, status.ullAvailPhys) } else { (0, 0) }
-}
-
-/// The adapter with the most dedicated memory. Discrete cards record it as
-/// `HardwareInformation.qwMemorySize`; integrated graphics don't, so they
-/// count as 0 (they share system RAM, which `fit` already accounts for).
-fn detect_gpu() -> Option<Gpu> {
-    (0..16)
-        .filter_map(|i| {
-            let key = format!(r"{DISPLAY_CLASS}\{i:04}");
-            let name = reg_string(&key, "DriverDesc")?;
-            let vram_bytes = reg_u64(&key, "HardwareInformation.qwMemorySize").unwrap_or(0);
-            Some(Gpu { name, vram_bytes })
-        })
-        .max_by_key(|g| g.vram_bytes)
-}
-
-fn reg_u64(subkey: &str, value: &str) -> Option<u64> {
-    let (subkey, value) = (wide(subkey), wide(value));
-    let mut data = 0u64;
-    let mut size = size_of::<u64>() as u32;
-    // SAFETY: subkey/value are NUL-terminated UTF-16; data is a writable u64
-    // and size holds its byte length, so the call can't write past it.
-    let err = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            subkey.as_ptr(),
-            value.as_ptr(),
-            RRF_RT_QWORD,
-            std::ptr::null_mut(),
-            (&mut data as *mut u64).cast(),
-            &mut size,
-        )
-    };
-    (err == 0).then_some(data)
-}
-
-fn reg_string(subkey: &str, value: &str) -> Option<String> {
-    let (subkey, value) = (wide(subkey), wide(value));
-    let mut buf = [0u16; 256];
-    let mut size = (buf.len() * 2) as u32;
-    // SAFETY: as in reg_u64; size is the buffer's length in bytes, and
-    // RRF_RT_REG_SZ makes the call NUL-terminate the string within it.
-    let err = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            subkey.as_ptr(),
-            value.as_ptr(),
-            RRF_RT_REG_SZ,
-            std::ptr::null_mut(),
-            buf.as_mut_ptr().cast(),
-            &mut size,
-        )
-    };
-    let s = from_wide(&buf);
-    (err == 0 && !s.is_empty()).then_some(s)
 }
 
 #[cfg(test)]

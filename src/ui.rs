@@ -24,6 +24,12 @@ const RULE: Emoji = Emoji("─", "-");
 
 const GIB: f64 = 1_073_741_824.0;
 
+/// What to call the user's computer: "Your PC", "This Mac".
+#[cfg(windows)]
+pub const COMPUTER: &str = "PC";
+#[cfg(target_os = "macos")]
+pub const COMPUTER: &str = "Mac";
+
 /// True when both stdin and stdout are a real console, so prompts can be shown.
 pub fn is_interactive() -> bool {
     std::io::stdin().is_terminal() && Term::stdout().is_term()
@@ -188,6 +194,7 @@ pub fn print_error(err: &anyhow::Error) {
 
 /// True when Windows opened a console just for this program, which happens
 /// when the .exe is double-clicked rather than run from a terminal.
+#[cfg(windows)]
 pub fn launched_by_double_click() -> bool {
     use windows_sys::Win32::System::Console::GetConsoleProcessList;
     let mut pids = [0u32; 2];
@@ -195,6 +202,13 @@ pub fn launched_by_double_click() -> bool {
     // only writes up to that many process IDs and returns the total count.
     let count = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
     count == 1
+}
+
+/// Terminal.app keeps the window open after the program exits, so there's
+/// never a window to hold open.
+#[cfg(target_os = "macos")]
+pub fn launched_by_double_click() -> bool {
+    false
 }
 
 /// Keep a double-clicked window open so its last message can be read.

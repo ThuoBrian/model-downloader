@@ -1,5 +1,5 @@
 //! Arrow-key menus shown when the program runs with no arguments
-//! (including when the .exe is double-clicked).
+//! (including when the .exe is double-clicked on Windows).
 
 use anyhow::{Result, bail};
 use console::style;
@@ -21,7 +21,7 @@ pub async fn run() -> Result<()> {
         "  {}",
         style("Open-weights reasoning models for llama.cpp, LM Studio and Ollama").dim()
     );
-    println!("  {}", style(format!("Your PC: {}", hw.summary())).dim());
+    println!("  {}", style(format!("Your {}: {}", ui::COMPUTER, hw.summary())).dim());
     println!(
         "  {}",
         style("Arrow keys to move, Enter to choose, Esc to go back.").dim()
@@ -44,7 +44,7 @@ pub async fn run() -> Result<()> {
 
         match choice {
             Some(0) => {
-                if let Some(model) = pick_model("Which model? (the best fit for your PC is selected)", &hw)? {
+                if let Some(model) = pick_model(&format!("Which model? (the best fit for your {} is selected)", ui::COMPUTER), &hw)? {
                     download(model, &hw).await?;
                 }
             }
@@ -157,10 +157,11 @@ async fn most_downloaded(hw: &Hardware) -> Result<()> {
         let fit = hw.fit(model.estimated_bytes(catalog::DEFAULT_QUANT));
         if matches!(fit, Fit::Tight | Fit::TooBig) {
             ui::warn(format!(
-                "{} is popular, but it's a {} {}. A smaller model may suit this PC better.",
+                "{} is popular, but it's a {} {}. A smaller model may suit this {} better.",
                 model.display_name,
                 fit.label(),
-                fit.explain(hw)
+                fit.explain(hw),
+                ui::COMPUTER
             ));
         }
         crate::print_info(model, false);
@@ -330,7 +331,7 @@ fn pick_drive() -> Result<Option<Volume>> {
         rows.push(format!("{} Back", ui::BACK));
 
         let choice = Select::with_theme(&ui::theme())
-            .with_prompt("Where should the model go? (\"This PC\" saves to your user folder)")
+            .with_prompt(format!("Where should the model go? (\"This {}\" saves to your user folder)", ui::COMPUTER))
             .items(&rows)
             .default(0)
             .interact_opt()?;
@@ -346,8 +347,9 @@ fn pick_drive() -> Result<Option<Volume>> {
         };
         if vol.is_fat32() {
             ui::warn(format!(
-                "{} is FAT32, which can't hold files over 4 GB. Reformat it as exFAT or NTFS, or pick another drive.",
-                vol.name()
+                "{} is FAT32, which can't hold files over 4 GB. Reformat it as {}, or pick another drive.",
+                vol.name(),
+                volumes::BIG_FILE_FORMATS
             ));
             continue;
         }
@@ -359,7 +361,7 @@ fn pick_drive() -> Result<Option<Volume>> {
 /// `models` folder inside it.
 fn ask_folder() -> Result<Option<Volume>> {
     let path: String = dialoguer::Input::with_theme(&ui::theme())
-        .with_prompt("Folder to save in, e.g. D:\\AI (leave empty to go back)")
+        .with_prompt(format!("Folder to save in, e.g. {} (leave empty to go back)", volumes::EXAMPLE_DIR))
         .allow_empty(true)
         .interact_text()?;
     let path = path.trim().trim_matches('"');

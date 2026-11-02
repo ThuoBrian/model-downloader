@@ -1,4 +1,5 @@
-# Publishes model-downloader.exe to GitHub Releases when a version tag is pushed:
+# Publishes model-downloader.exe and a universal macOS build to GitHub
+# Releases when a version tag is pushed:
 #
 #   git tag v0.1.0
 #   git push origin v0.1.0
@@ -47,3 +48,44 @@ jobs:
             model-downloader.exe
             model-downloader.exe.sha256
           generate_release_notes: true
+
+  macos:
+    # Wait for the Windows job, which creates the release, so the two jobs
+    # don't both try to create it at once.
+    needs: release
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the tag matches Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "${{ github.ref_name }}" ]; then
+            echo "Tag ${{ github.ref_name }} doesn't match Cargo.toml version $version" >&2
+            exit 1
+          fi
+
+      - run: cargo test
+      - run: cargo build --release --target aarch64-apple-darwin
+      - run: cargo build --release --target x86_64-apple-darwin
+
+      # One binary that runs natively on Apple Silicon and Intel Macs, under a
+      # fixed name so scripts/install.sh can always fetch the latest:
+      # https://github.com/<owner>/<repo>/releases/latest/download/model-downloader-macos.tar.gz
+      - name: Package
+        run: |
+          lipo -create -output model-downloader \
+            target/aarch64-apple-darwin/release/model-downloader \
+            target/x86_64-apple-darwin/release/model-downloader
+          tar -czf model-downloader-macos.tar.gz model-downloader
+          shasum -a 256 model-downloader-macos.tar.gz > model-downloader-macos.tar.gz.sha256
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            model-downloader-macos.tar.gz
+            model-downloader-macos.tar.gz.sha256

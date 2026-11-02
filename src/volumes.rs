@@ -1,34 +1,46 @@
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
-use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, GetVolumePathNameW,
-};
-use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOTE, DRIVE_REMOVABLE};
 
 use crate::ui;
 
+#[cfg_attr(windows, path = "volumes/windows.rs")]
+#[cfg_attr(target_os = "macos", path = "volumes/macos.rs")]
+pub(crate) mod sys;
+
 /// Largest file a FAT32 volume can hold (4 GiB - 1 byte).
 pub const FAT32_MAX_FILE: u64 = 4 * 1_073_741_824 - 1;
+
+/// An example folder for `--dir` and the folder prompt.
+#[cfg(windows)]
+pub const EXAMPLE_DIR: &str = r"D:\Models";
+#[cfg(target_os = "macos")]
+pub const EXAMPLE_DIR: &str = "~/Models";
+
+/// Formats that hold files over 4 GB and that this OS can write to.
+#[cfg(windows)]
+pub const BIG_FILE_FORMATS: &str = "exFAT or NTFS";
+#[cfg(target_os = "macos")]
+pub const BIG_FILE_FORMATS: &str = "exFAT or APFS";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// A drive other than the system drive; models go in its root.
     Drive,
-    /// The drive Windows is on; models go in the user's folder.
+    /// The drive the OS is on; models go in the user's folder.
     System,
     /// A folder the user chose.
     Folder,
 }
 
 /// Somewhere models can be saved: a drive or a chosen folder. Models land
-/// in `<path>\models\<model-id>\`.
+/// in `<path>/models/<model-id>/`.
 #[derive(Debug, Clone)]
 pub struct Volume {
-    /// Drive letter with colon, e.g. "E:"
+    /// Drive letter with colon, e.g. "E:" (empty on macOS)
     pub letter: String,
     /// Volume label, e.g. "MyExternal" (may be empty)
     pub label: String,
-    /// File system name, e.g. "NTFS", "exFAT", "FAT32"
+    /// File system name, e.g. "NTFS", "exFAT", "FAT32", "APFS"
     pub filesystem: String,
     pub path: PathBuf,
     /// Available space in bytes (0 if we couldn't determine it)
@@ -39,15 +51,23 @@ pub struct Volume {
 }
 
 impl Volume {
-    /// "E: MyExternal", "E:" when the drive has no label, "C: This PC" for
-    /// the system drive, or the folder path for a chosen folder.
+    /// "E: MyExternal", "E:" when the drive has no label, "MyExternal" on a
+    /// Mac, "C: This PC" or "This Mac" for the system drive, or the folder
+    /// path for a chosen folder.
     pub fn name(&self) -> String {
         match self.kind {
-            Kind::System => format!("{} This PC", self.letter),
+            Kind::System if self.letter.is_empty() => format!("This {}", ui::COMPUTER),
+            Kind::System => format!("{} This {}", self.letter, ui::COMPUTER),
             Kind::Folder => self.path.display().to_string(),
             Kind::Drive if self.label.is_empty() => self.letter.clone(),
+            Kind::Drive if self.letter.is_empty() => self.label.clone(),
             Kind::Drive => format!("{} {}", self.letter, self.label),
         }
+    }
+
+    /// What to pass to `--volume`: the drive letter, or the name on a Mac.
+    pub fn id(&self) -> &str {
+        if self.letter.is_empty() { &self.label } else { &self.letter }
     }
 
     /// True if `query` is this drive's letter ("E", "e:", "E:\") or its label.
@@ -56,7 +76,7 @@ impl Volume {
             return false;
         }
         let q = query.trim_end_matches(['\\', '/']).trim_end_matches(':');
-        self.letter.trim_end_matches(':').eq_ignore_ascii_case(q)
+        (!self.letter.is_empty() && self.letter.trim_end_matches(':').eq_ignore_ascii_case(q))
             || (!self.label.is_empty() && self.label.eq_ignore_ascii_case(query))
     }
 
@@ -69,133 +89,29 @@ impl Volume {
     }
 }
 
-pub(crate) fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-pub(crate) fn from_wide(buf: &[u16]) -> String {
-    let len = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
-    String::from_utf16_lossy(&buf[..len])
-}
-
-/// Read label, file system and space for a drive root like "E:\".
-fn query_volume(letter: String, root: &str) -> Volume {
-    let root_w = wide(root);
-
-    let mut label = [0u16; 261];
-    let mut fs_name = [0u16; 261];
-    // SAFETY: root_w is a NUL-terminated UTF-16 string that outlives the call;
-    // both output buffers are valid for the lengths we pass; the optional
-    // serial/length/flags pointers may be null per the Win32 docs.
-    let ok = unsafe {
-        GetVolumeInformationW(
-            root_w.as_ptr(),
-            label.as_mut_ptr(),
-            label.len() as u32,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            fs_name.as_mut_ptr(),
-            fs_name.len() as u32,
-        )
-    };
-    let (label, filesystem) = if ok != 0 {
-        (from_wide(&label).trim().to_string(), from_wide(&fs_name))
-    } else {
-        (String::new(), String::new())
-    };
-
-    let mut free = 0u64;
-    let mut total = 0u64;
-    // SAFETY: root_w is NUL-terminated; free/total are valid u64 out-pointers;
-    // the total-free-bytes pointer may be null.
-    let ok = unsafe { GetDiskFreeSpaceExW(root_w.as_ptr(), &mut free, &mut total, std::ptr::null_mut()) };
-    if ok == 0 {
-        (free, total) = (0, 0);
-    }
-
-    Volume {
-        letter,
-        label,
-        filesystem,
-        path: PathBuf::from(root),
-        free_bytes: free,
-        total_bytes: total,
-        kind: Kind::Drive,
-    }
-}
-
 /// Use any folder (created if missing) as the place to save models.
 pub fn from_folder(path: &Path) -> Result<Volume> {
-    let folder = std::path::absolute(path)
+    // The shell expands ~ in --dir, but nothing does in the folder prompt.
+    let path = match (cfg!(unix), path.strip_prefix("~"), std::env::var_os("HOME")) {
+        (true, Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => path.to_path_buf(),
+    };
+    let folder = std::path::absolute(&path)
         .with_context(|| format!("'{}' isn't a valid folder path.", path.display()))?;
     std::fs::create_dir_all(&folder)
         .with_context(|| format!("Couldn't create the folder {}.", folder.display()))?;
 
-    let folder_w = wide(&folder.to_string_lossy());
-    let mut root = [0u16; 261];
-    // SAFETY: folder_w is NUL-terminated UTF-16; root is a writable buffer
-    // whose length in characters is what we pass.
-    let ok = unsafe { GetVolumePathNameW(folder_w.as_ptr(), root.as_mut_ptr(), root.len() as u32) };
-    if ok == 0 {
-        bail!("Couldn't tell which drive {} is on.", folder.display());
-    }
-    let root = from_wide(&root);
-
-    let mut vol = query_volume(root.trim_end_matches('\\').to_string(), &root);
+    let mut vol = sys::folder_volume(&folder)?;
     vol.path = folder;
     vol.kind = Kind::Folder;
     Ok(vol)
 }
 
-/// Find places to save models: USB and external disks, extra internal disks
-/// and mapped network drives first (largest free space first), then the
-/// system drive, which saves into the user's folder. CD/DVD drives, RAM disks
-/// and empty card readers are skipped.
+/// Find places to save models: external disks, extra internal disks and
+/// network drives first (largest free space first), then the system drive,
+/// which saves into the user's folder.
 pub fn detect_volumes() -> Result<Vec<Volume>> {
-    let system_drive = std::env::var("SystemDrive")
-        .unwrap_or_else(|_| "C:".to_string())
-        .to_uppercase();
-
-    // SAFETY: GetLogicalDrives takes no arguments and only returns a bitmask.
-    let mask = unsafe { GetLogicalDrives() };
-    if mask == 0 {
-        return Err(std::io::Error::last_os_error()).context("Failed to list drive letters");
-    }
-
-    let mut volumes = Vec::new();
-    let mut system = None;
-    for i in 0..26u8 {
-        if mask & (1 << i) == 0 {
-            continue;
-        }
-        let letter = format!("{}:", (b'A' + i) as char);
-        if letter == system_drive {
-            // Standard users can't write to C:\ itself, so use their own folder.
-            let root = format!("{letter}\\");
-            let mut vol = query_volume(letter, &root);
-            vol.kind = Kind::System;
-            vol.path = std::env::var_os("USERPROFILE").map_or_else(|| PathBuf::from(root), PathBuf::from);
-            system = Some(vol);
-            continue;
-        }
-        let root = format!("{letter}\\");
-        let root_w = wide(&root);
-        // SAFETY: root_w is a NUL-terminated UTF-16 string that outlives the call.
-        let kind = unsafe { GetDriveTypeW(root_w.as_ptr()) };
-        if !matches!(kind, DRIVE_REMOVABLE | DRIVE_FIXED | DRIVE_REMOTE) {
-            continue;
-        }
-
-        let vol = query_volume(letter, &root);
-        // An empty card reader or ejected USB slot reports no file system.
-        if vol.filesystem.is_empty() {
-            continue;
-        }
-        volumes.push(vol);
-    }
-
-    // Largest free space first, then the system drive
+    let (mut volumes, system) = sys::detect_volumes()?;
     volumes.sort_by_key(|v| std::cmp::Reverse(v.free_bytes));
     volumes.extend(system);
     Ok(volumes)
@@ -219,7 +135,7 @@ pub fn print_volumes(volumes: &[Volume]) {
     for vol in volumes {
         println!("  {}", describe(vol));
         if vol.kind == Kind::System {
-            ui::hint(format!("saves to {}\\models", vol.path.display()));
+            ui::hint(format!("saves to {}", vol.path.join("models").display()));
         }
     }
     println!();
@@ -229,7 +145,7 @@ pub fn print_volumes(volumes: &[Volume]) {
 /// only one, or ask.
 pub fn pick_volume(volumes: &[Volume]) -> Result<&Volume> {
     if volumes.is_empty() {
-        bail!("No drives found.\nPass a folder with --dir, e.g. --dir D:\\Models");
+        bail!("No drives found.\nPass a folder with --dir, e.g. --dir {EXAMPLE_DIR}");
     }
 
     if volumes.len() == 1 {
@@ -240,7 +156,7 @@ pub fn pick_volume(volumes: &[Volume]) -> Result<&Volume> {
     if !ui::is_interactive() {
         bail!(
             "Several drives are connected.\nChoose one with --volume (e.g. --volume {}) or a folder with --dir.",
-            volumes[0].letter
+            volumes[0].id()
         );
     }
 
@@ -285,6 +201,15 @@ mod tests {
     }
 
     #[test]
+    fn mac_drives_go_by_name() {
+        let v = vol("", "MyExternal", "exFAT");
+        assert_eq!(v.name(), "MyExternal");
+        assert_eq!(v.id(), "MyExternal");
+        assert!(v.matches("myexternal"));
+        assert!(!v.matches(""), "an empty query doesn't match an empty letter");
+    }
+
+    #[test]
     fn detects_fat32() {
         assert!(vol("E:", "", "FAT32").is_fat32());
         assert!(!vol("E:", "", "exFAT").is_fat32());
@@ -296,7 +221,8 @@ mod tests {
         let vols = detect_volumes().unwrap();
         let last = vols.last().expect("the system drive is always listed");
         assert_eq!(last.kind, Kind::System);
-        assert_eq!(Some(last.path.as_os_str()), std::env::var_os("USERPROFILE").as_deref());
+        let home = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+        assert_eq!(Some(last.path.as_os_str()), std::env::var_os(home).as_deref());
         assert_eq!(vols.iter().filter(|v| v.kind == Kind::System).count(), 1);
     }
 
@@ -308,7 +234,7 @@ mod tests {
         assert_eq!(vol.kind, Kind::Folder);
         assert_eq!(vol.path, dir);
         assert!(vol.free_bytes > 0 && !vol.filesystem.is_empty());
-        assert!(!vol.matches(&vol.letter), "folders aren't picked by drive letter");
+        assert!(!vol.matches(vol.id()), "folders aren't picked by drive letter");
         std::fs::remove_dir(&dir).unwrap();
     }
 }
