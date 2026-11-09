@@ -1,22 +1,22 @@
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
-use indicatif::ProgressBar;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tokio::fs::File;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::catalog::ModelEntry;
-use crate::ui;
+use crate::format::format_size;
 
 const HF_BASE: &str = "https://huggingface.co";
 const OLLAMA_REGISTRY: &str = "https://registry.ollama.ai";
 
-#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Source {
-    #[value(name = "hf", alias = "huggingface")]
     HuggingFace,
     Ollama,
 }
@@ -308,6 +308,30 @@ async fn resolve_ollama(client: &reqwest::Client, model: &ModelEntry) -> Result<
 
 // ── Download with progress + resume ─────────────────────────────────────────
 
+/// What a running download reports back to the window.
+#[derive(Debug)]
+pub enum Event {
+    /// Starting file `index` of a model split into parts (0 for most models).
+    File { index: usize },
+    /// Re-reading the part of a file kept from an earlier run, to checksum it.
+    Checking { done: u64, total: u64 },
+    /// Bytes of the current file on disk so far.
+    Progress { done: u64, total: u64 },
+    /// A one-line status message, e.g. "Checksum OK: model.gguf".
+    Note(String),
+}
+
+pub type Events = UnboundedSender<Event>;
+
+/// How often progress is reported. Faster gains nothing visible.
+const REPORT_EVERY: Duration = Duration::from_millis(100);
+
+/// A closed channel means nobody is watching any more, which is no reason
+/// to stop the download.
+fn send(events: &Events, event: Event) {
+    let _ = events.send(event);
+}
+
 /// Path of the in-progress download for `dest` (`<dest>.part`).
 fn part_path(dest: &Path) -> PathBuf {
     let mut s: OsString = dest.as_os_str().to_owned();
@@ -325,16 +349,16 @@ pub fn existing_bytes(dest: &Path) -> u64 {
         .unwrap_or(0)
 }
 
-/// Download a file with streaming, progress bar, and resume support.
+/// Download a file with streaming, progress events, and resume support.
 /// Data is written to `<dest>.part` and renamed to `dest` only once the full
 /// file has arrived and, when the source publishes a SHA-256, matches it. So a
-/// file at `dest` is always complete. `label` prefixes the progress bar
-/// (e.g. "part 1/2").
+/// file at `dest` is always complete. Dropping the future (pausing) leaves the
+/// `.part` file in place for the next run to resume.
 pub async fn download_with_progress(
     client: &reqwest::Client,
     file: &RemoteFile,
     dest: &Path,
-    label: &str,
+    events: &Events,
 ) -> Result<()> {
     let url = file.url.as_str();
     let part = part_path(dest);
@@ -364,7 +388,7 @@ pub async fn download_with_progress(
 
     if let Ok(meta) = tokio::fs::metadata(dest).await {
         if total_size == 0 || meta.len() == total_size {
-            ui::success(format!("Already downloaded: {name}"));
+            send(events, Event::Note(format!("Already downloaded: {name}")));
             return Ok(());
         }
         // A wrong-sized file at `dest` (e.g. left by an older version of this
@@ -386,13 +410,13 @@ pub async fn download_with_progress(
     // Bytes kept from an earlier run go into the checksum first.
     let mut hasher = Sha256::new();
     if file.sha256.is_some() && existing_size > 0 {
-        hasher = hash_prefix(&part, existing_size, &name).await?;
+        hasher = hash_prefix(&part, existing_size, events).await?;
     }
 
     if total_size > 0 && existing_size == total_size {
-        check_hash(hasher, file, &part, &name)?;
+        check_hash(hasher, file, &part, &name, events)?;
         tokio::fs::rename(&part, dest).await?;
-        ui::success(format!("Already downloaded: {name}"));
+        send(events, Event::Note(format!("Already downloaded: {name}")));
         return Ok(());
     }
 
@@ -406,9 +430,9 @@ pub async fn download_with_progress(
 
     if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && total_size == 0 {
         // Size unknown and the server has nothing past our offset — treat as complete.
-        check_hash(hasher, file, &part, &name)?;
+        check_hash(hasher, file, &part, &name, events)?;
         tokio::fs::rename(&part, dest).await?;
-        ui::success(format!("Already downloaded: {name}"));
+        send(events, Event::Note(format!("Already downloaded: {name}")));
         return Ok(());
     }
     if !resp.status().is_success() {
@@ -425,20 +449,20 @@ pub async fn download_with_progress(
     let expected_total = if total_size > 0 { total_size } else { offset + content_length };
 
     if is_resuming {
-        ui::hint(format!(
-            "Resuming {name} at {} ({:.0}%)",
-            ui::format_size(offset),
-            (offset as f64 / expected_total.max(1) as f64) * 100.0
-        ));
+        send(
+            events,
+            Event::Note(format!(
+                "Resuming {name} at {} ({:.0}%)",
+                format_size(offset),
+                (offset as f64 / expected_total.max(1) as f64) * 100.0
+            )),
+        );
     }
-
-    let pb = ProgressBar::new(expected_total.max(1))
-        .with_style(ui::download_style())
-        .with_prefix(label.to_string())
-        .with_position(offset);
-    // Keep the spinner and ETA moving even while the network stalls.
-    pb.enable_steady_tick(std::time::Duration::from_millis(200));
-    pb.reset_eta();
+    let progress = |done| Event::Progress {
+        done,
+        total: expected_total,
+    };
+    send(events, progress(offset));
 
     // Open .part for append if resuming, truncate otherwise
     let mut out = if is_resuming {
@@ -455,30 +479,34 @@ pub async fn download_with_progress(
 
     let mut stream = resp.bytes_stream();
     let mut written = offset;
+    let mut last_report = Instant::now();
 
     while let Some(chunk_result) = stream.next().await {
-        let chunk = chunk_result.context("Error reading download stream (re-run to resume)")?;
+        let chunk = chunk_result.context("The connection dropped. Start the download again to resume")?;
         out.write_all(&chunk)
             .await
             .context("Failed to write downloaded data")?;
         hasher.update(&chunk);
         written += chunk.len() as u64;
-        pb.inc(chunk.len() as u64);
+        if last_report.elapsed() >= REPORT_EVERY {
+            send(events, progress(written));
+            last_report = Instant::now();
+        }
     }
 
     out.flush().await?;
     drop(out);
-    pb.finish();
+    send(events, progress(written));
 
     if expected_total > 0 && written != expected_total {
         bail!(
-            "Incomplete download: got {} of {} bytes. Re-run the same command to resume.",
+            "Incomplete download: got {} of {} bytes. Start the download again to resume.",
             written,
             expected_total
         );
     }
 
-    check_hash(hasher, file, &part, &name)?;
+    check_hash(hasher, file, &part, &name, events)?;
     tokio::fs::rename(&part, dest)
         .await
         .with_context(|| format!("Failed to move {} into place", part.display()))?;
@@ -487,41 +515,42 @@ pub async fn download_with_progress(
 }
 
 /// SHA-256 of the first `len` bytes of a partial download. Runs on a
-/// blocking thread with its own progress bar: a large part can take a while.
-async fn hash_prefix(part: &Path, len: u64, name: &str) -> Result<Sha256> {
-    let pb = ProgressBar::new(len)
-        .with_style(ui::task_style())
-        .with_message(format!("Checking the part of {name} already downloaded"));
-    let (part, bar) = (part.to_path_buf(), pb.clone());
-    let hasher = tokio::task::spawn_blocking(move || -> std::io::Result<Sha256> {
+/// blocking thread and reports progress: a large part can take a while.
+async fn hash_prefix(part: &Path, len: u64, events: &Events) -> Result<Sha256> {
+    let (part, events) = (part.to_path_buf(), events.clone());
+    tokio::task::spawn_blocking(move || -> std::io::Result<Sha256> {
         use std::io::Read;
         let mut reader = std::fs::File::open(&part)?.take(len);
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; 1 << 20];
+        let mut done = 0;
+        let mut last_report = Instant::now();
         loop {
             let n = reader.read(&mut buf)?;
             if n == 0 {
                 return Ok(hasher);
             }
             hasher.update(&buf[..n]);
-            bar.inc(n as u64);
+            done += n as u64;
+            if last_report.elapsed() >= REPORT_EVERY {
+                send(&events, Event::Checking { done, total: len });
+                last_report = Instant::now();
+            }
         }
     })
     .await?
-    .context("Couldn't read the partly downloaded file")?;
-    pb.finish_and_clear();
-    Ok(hasher)
+    .context("Couldn't read the partly downloaded file")
 }
 
 /// Compare against the published SHA-256. On a mismatch the file is useless,
 /// so delete it rather than leave a broken model behind.
-fn check_hash(hasher: Sha256, file: &RemoteFile, part: &Path, name: &str) -> Result<()> {
+fn check_hash(hasher: Sha256, file: &RemoteFile, part: &Path, name: &str, events: &Events) -> Result<()> {
     let Some(expected) = &file.sha256 else {
         return Ok(());
     };
     let actual: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
     if actual == *expected {
-        ui::success(format!("Checksum OK: {name}"));
+        send(events, Event::Note(format!("Checksum OK: {name}")));
         return Ok(());
     }
     let _ = std::fs::remove_file(part);
@@ -566,6 +595,10 @@ mod tests {
         }
     }
 
+    fn events() -> Events {
+        tokio::sync::mpsc::unbounded_channel().0
+    }
+
     fn temp_file(tag: &str, contents: &[u8]) -> PathBuf {
         let path = std::env::temp_dir().join(format!("model-downloader-{tag}-{}", std::process::id()));
         std::fs::write(&path, contents).unwrap();
@@ -577,7 +610,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn finds_abliterated_models_online() {
-        let found = hf_abliterated(&crate::http_client().unwrap()).await.unwrap();
+        let found = hf_abliterated(&crate::download::http_client().unwrap()).await.unwrap();
         assert!(found.len() >= 5, "found {}", found.len());
         assert!(found.iter().all(|m| m.q4_bytes > 0));
     }
@@ -587,7 +620,7 @@ mod tests {
         let path = temp_file("ok", b"abc");
         let mut hasher = Sha256::new();
         hasher.update(b"abc");
-        check_hash(hasher, &remote(Some(ABC)), &path, "test.gguf").unwrap();
+        check_hash(hasher, &remote(Some(ABC)), &path, "test.gguf", &events()).unwrap();
         assert!(path.exists());
         std::fs::remove_file(path).unwrap();
     }
@@ -597,7 +630,7 @@ mod tests {
         let path = temp_file("bad", b"abd");
         let mut hasher = Sha256::new();
         hasher.update(b"abd");
-        let err = check_hash(hasher, &remote(Some(ABC)), &path, "test.gguf").unwrap_err();
+        let err = check_hash(hasher, &remote(Some(ABC)), &path, "test.gguf", &events()).unwrap_err();
         assert!(err.to_string().contains("doesn't match"), "{err}");
         assert!(!path.exists(), "a corrupt download is deleted");
     }
@@ -605,7 +638,7 @@ mod tests {
     #[test]
     fn no_published_checksum_is_accepted() {
         let path = temp_file("none", b"anything");
-        check_hash(Sha256::new(), &remote(None), &path, "test.gguf").unwrap();
+        check_hash(Sha256::new(), &remote(None), &path, "test.gguf", &events()).unwrap();
         std::fs::remove_file(path).unwrap();
     }
 
@@ -613,8 +646,8 @@ mod tests {
     async fn resuming_hashes_only_the_kept_prefix() {
         // A part file with 3 good bytes plus junk past the resume point.
         let path = temp_file("prefix", b"abcJUNK");
-        let hasher = hash_prefix(&path, 3, "test.gguf").await.unwrap();
-        check_hash(hasher, &remote(Some(ABC)), &path, "test.gguf").unwrap();
+        let hasher = hash_prefix(&path, 3, &events()).await.unwrap();
+        check_hash(hasher, &remote(Some(ABC)), &path, "test.gguf", &events()).unwrap();
         std::fs::remove_file(path).unwrap();
     }
 }

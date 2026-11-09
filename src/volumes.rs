@@ -1,7 +1,7 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-use crate::ui;
+use crate::format::COMPUTER;
 
 #[cfg_attr(windows, path = "volumes/windows.rs")]
 #[cfg_attr(target_os = "macos", path = "volumes/macos.rs")]
@@ -9,12 +9,6 @@ pub(crate) mod sys;
 
 /// Largest file a FAT32 volume can hold (4 GiB - 1 byte).
 pub const FAT32_MAX_FILE: u64 = 4 * 1_073_741_824 - 1;
-
-/// An example folder for `--dir` and the folder prompt.
-#[cfg(windows)]
-pub const EXAMPLE_DIR: &str = r"D:\Models";
-#[cfg(target_os = "macos")]
-pub const EXAMPLE_DIR: &str = "~/Models";
 
 /// Formats that hold files over 4 GB and that this OS can write to.
 #[cfg(windows)]
@@ -56,28 +50,13 @@ impl Volume {
     /// path for a chosen folder.
     pub fn name(&self) -> String {
         match self.kind {
-            Kind::System if self.letter.is_empty() => format!("This {}", ui::COMPUTER),
-            Kind::System => format!("{} This {}", self.letter, ui::COMPUTER),
+            Kind::System if self.letter.is_empty() => format!("This {}", COMPUTER),
+            Kind::System => format!("{} This {}", self.letter, COMPUTER),
             Kind::Folder => self.path.display().to_string(),
             Kind::Drive if self.label.is_empty() => self.letter.clone(),
             Kind::Drive if self.letter.is_empty() => self.label.clone(),
             Kind::Drive => format!("{} {}", self.letter, self.label),
         }
-    }
-
-    /// What to pass to `--volume`: the drive letter, or the name on a Mac.
-    pub fn id(&self) -> &str {
-        if self.letter.is_empty() { &self.label } else { &self.letter }
-    }
-
-    /// True if `query` is this drive's letter ("E", "e:", "E:\") or its label.
-    pub fn matches(&self, query: &str) -> bool {
-        if self.kind == Kind::Folder {
-            return false;
-        }
-        let q = query.trim_end_matches(['\\', '/']).trim_end_matches(':');
-        (!self.letter.is_empty() && self.letter.trim_end_matches(':').eq_ignore_ascii_case(q))
-            || (!self.label.is_empty() && self.label.eq_ignore_ascii_case(query))
     }
 
     pub fn is_fat32(&self) -> bool {
@@ -91,7 +70,7 @@ impl Volume {
 
 /// Use any folder (created if missing) as the place to save models.
 pub fn from_folder(path: &Path) -> Result<Volume> {
-    // The shell expands ~ in --dir, but nothing does in the folder prompt.
+    // Expand ~ to the home folder, as a shell would.
     let path = match (cfg!(unix), path.strip_prefix("~"), std::env::var_os("HOME")) {
         (true, Ok(rest), Some(home)) => PathBuf::from(home).join(rest),
         _ => path.to_path_buf(),
@@ -117,63 +96,6 @@ pub fn detect_volumes() -> Result<Vec<Volume>> {
     Ok(volumes)
 }
 
-/// One aligned line describing a drive, for tables and menus.
-pub fn describe(vol: &Volume) -> String {
-    // pad_str measures width without colour codes, unlike {:>14}.
-    let free = ui::free_space(vol.free_bytes).to_string();
-    format!(
-        "{:<22} {:<6} {}  of {:.0} GB",
-        vol.name(),
-        vol.filesystem,
-        console::pad_str(&free, 12, console::Alignment::Right, None),
-        vol.total_gb()
-    )
-}
-
-pub fn print_volumes(volumes: &[Volume]) {
-    ui::heading("Drives");
-    for vol in volumes {
-        println!("  {}", describe(vol));
-        if vol.kind == Kind::System {
-            ui::hint(format!("saves to {}", vol.path.join("models").display()));
-        }
-    }
-    println!();
-}
-
-/// Choose a drive when neither `--volume` nor `--dir` was given: use the
-/// only one, or ask.
-pub fn pick_volume(volumes: &[Volume]) -> Result<&Volume> {
-    if volumes.is_empty() {
-        bail!("No drives found.\nPass a folder with --dir, e.g. --dir {EXAMPLE_DIR}");
-    }
-
-    if volumes.len() == 1 {
-        ui::success(format!("Saving to the only drive found: {}", volumes[0].name()));
-        return Ok(&volumes[0]);
-    }
-
-    if !ui::is_interactive() {
-        bail!(
-            "Several drives are connected.\nChoose one with --volume (e.g. --volume {}) or a folder with --dir.",
-            volumes[0].id()
-        );
-    }
-
-    let rows: Vec<String> = volumes.iter().map(describe).collect();
-    let choice = dialoguer::Select::with_theme(&ui::theme())
-        .with_prompt("Which drive should the model go on?")
-        .items(&rows)
-        .default(0)
-        .interact_opt()
-        .context("Couldn't show the drive picker")?;
-
-    match choice {
-        Some(i) => Ok(&volumes[i]),
-        None => bail!("No drive chosen."),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,22 +113,9 @@ mod tests {
     }
 
     #[test]
-    fn matches_letter_or_label() {
-        let v = vol("E:", "MyExternal", "exFAT");
-        for q in ["E", "e", "E:", "e:\\", "E:/", "MyExternal", "myexternal"] {
-            assert!(v.matches(q), "{q} should match");
-        }
-        assert!(!v.matches("F:"));
-        assert!(!vol("E:", "", "NTFS").matches(""));
-    }
-
-    #[test]
     fn mac_drives_go_by_name() {
         let v = vol("", "MyExternal", "exFAT");
         assert_eq!(v.name(), "MyExternal");
-        assert_eq!(v.id(), "MyExternal");
-        assert!(v.matches("myexternal"));
-        assert!(!v.matches(""), "an empty query doesn't match an empty letter");
     }
 
     #[test]
@@ -234,7 +143,6 @@ mod tests {
         assert_eq!(vol.kind, Kind::Folder);
         assert_eq!(vol.path, dir);
         assert!(vol.free_bytes > 0 && !vol.filesystem.is_empty());
-        assert!(!vol.matches(vol.id()), "folders aren't picked by drive letter");
         std::fs::remove_dir(&dir).unwrap();
     }
 }

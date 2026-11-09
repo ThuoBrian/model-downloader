@@ -1,10 +1,6 @@
 //! What this computer can run: total RAM and dedicated graphics memory, and a rough
 //! rating of whether a model of a given size will run on it.
 
-use console::{StyledObject, style};
-
-use crate::ui;
-
 #[cfg_attr(windows, path = "hardware/windows.rs")]
 #[cfg_attr(target_os = "macos", path = "hardware/macos.rs")]
 mod sys;
@@ -48,19 +44,18 @@ impl Fit {
         }
     }
 
-    /// e.g. "✓ runs well", padded to a fixed width before colouring.
-    pub fn styled(self) -> StyledObject<String> {
-        let glyph = match self {
-            Fit::Fast | Fit::Good => ui::OK,
-            Fit::Tight => ui::WARN,
-            Fit::TooBig => ui::ERR,
-        };
-        let text = style(format!("{} {:<9}", glyph, self.label()));
+    /// "✔", "⚠" or "✖"; the GUI colours it.
+    pub fn glyph(self) -> &'static str {
         match self {
-            Fit::Fast | Fit::Good => text.green(),
-            Fit::Tight => text.yellow(),
-            Fit::TooBig => text.red(),
+            Fit::Fast | Fit::Good => "✔",
+            Fit::Tight => "⚠",
+            Fit::TooBig => "✖",
         }
+    }
+
+    /// True when the model runs fast or well, not just barely.
+    pub fn runs_well(self) -> bool {
+        matches!(self, Fit::Fast | Fit::Good)
     }
 
     pub fn explain(self, hw: &Hardware) -> String {
