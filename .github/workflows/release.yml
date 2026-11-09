@@ -73,19 +73,36 @@ jobs:
       - run: cargo build --release --target aarch64-apple-darwin
       - run: cargo build --release --target x86_64-apple-darwin
 
-      # One binary that runs natively on Apple Silicon and Intel Macs, under a
-      # fixed name so scripts/install.sh can always fetch the latest:
-      # https://github.com/<owner>/<repo>/releases/latest/download/model-downloader-macos.tar.gz
+      # A double-clickable Model Downloader.app holding one binary that runs
+      # natively on Apple Silicon and Intel Macs, zipped under a fixed name so
+      # scripts/install.sh can always fetch the latest:
+      # https://github.com/<owner>/<repo>/releases/latest/download/Model-Downloader-macos.zip
       - name: Package
         run: |
-          lipo -create -output model-downloader \
+          app="Model Downloader.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          lipo -create -output "$app/Contents/MacOS/model-downloader" \
             target/aarch64-apple-darwin/release/model-downloader \
             target/x86_64-apple-darwin/release/model-downloader
-          tar -czf model-downloader-macos.tar.gz model-downloader
-          shasum -a 256 model-downloader-macos.tar.gz > model-downloader-macos.tar.gz.sha256
+
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          sed "s/__VERSION__/$version/g" assets/macos/Info.plist > "$app/Contents/Info.plist"
+
+          iconset=AppIcon.iconset
+          mkdir -p "$iconset"
+          for size in 16 32 128 256 512; do
+            sips -z $size $size assets/icon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
+            double=$((size * 2))
+            sips -z $double $double assets/icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
+
+          # ditto keeps the bundle's permissions and metadata, unlike zip.
+          ditto -c -k --keepParent "$app" Model-Downloader-macos.zip
+          shasum -a 256 Model-Downloader-macos.zip > Model-Downloader-macos.zip.sha256
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            model-downloader-macos.tar.gz
-            model-downloader-macos.tar.gz.sha256
+            Model-Downloader-macos.zip
+            Model-Downloader-macos.zip.sha256

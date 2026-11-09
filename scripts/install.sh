@@ -1,19 +1,20 @@
 #!/bin/sh
-# Install the latest model-downloader on a Mac. Run it in Terminal:
+# Install the latest Model Downloader app on a Mac. Run it in Terminal:
 #
 #   curl -fsSL https://raw.githubusercontent.com/ThuoBrian/model-downloader/main/scripts/install.sh | sh
 #
-# It downloads the universal (Apple Silicon + Intel) build from the latest
-# GitHub release, checks its checksum, and puts it in ~/.local/bin. Files
-# downloaded with curl aren't quarantined, so Gatekeeper doesn't block it.
+# It downloads the universal (Apple Silicon + Intel) app from the latest
+# GitHub release, checks its checksum, and puts it in ~/Applications. The
+# app isn't signed, so the quarantine flag is cleared to let it open.
 # Run it again to update.
 
 set -eu
 
 repo="ThuoBrian/model-downloader"
-asset="model-downloader-macos.tar.gz"
+asset="Model-Downloader-macos.zip"
 url="https://github.com/$repo/releases/latest/download/$asset"
-bin_dir="$HOME/.local/bin"
+app_dir="$HOME/Applications"
+app="$app_dir/Model Downloader.app"
 
 if [ "$(uname -s)" != "Darwin" ]; then
     echo "This installer is for macOS. On Windows, download model-downloader.exe from the releases page." >&2
@@ -23,7 +24,7 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-echo "Downloading model-downloader..."
+echo "Downloading Model Downloader..."
 curl -fsSL "$url" -o "$tmp/$asset"
 curl -fsSL "$url.sha256" -o "$tmp/$asset.sha256"
 (cd "$tmp" && shasum -a 256 -c "$asset.sha256" >/dev/null) || {
@@ -31,19 +32,18 @@ curl -fsSL "$url.sha256" -o "$tmp/$asset.sha256"
     exit 1
 }
 
-tar -xzf "$tmp/$asset" -C "$tmp"
-mkdir -p "$bin_dir"
-install -m 755 "$tmp/model-downloader" "$bin_dir/model-downloader"
-echo "Installed: $bin_dir/model-downloader"
+ditto -x -k "$tmp/$asset" "$tmp"
+mkdir -p "$app_dir"
+rm -rf "$app"
+mv "$tmp/Model Downloader.app" "$app"
+xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
+echo "Installed: $app"
 
-case ":$PATH:" in
-    *":$bin_dir:"*)
-        echo "Run it with: model-downloader"
-        ;;
-    *)
-        echo
-        echo "$bin_dir isn't on your PATH yet. Add it by running:"
-        echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zprofile && source ~/.zprofile"
-        echo "Then run: model-downloader"
-        ;;
-esac
+# Versions before 0.6.0 were a command-line tool in ~/.local/bin.
+old="$HOME/.local/bin/model-downloader"
+if [ -f "$old" ]; then
+    rm -f "$old"
+    echo "Removed the old command-line version: $old"
+fi
+
+echo "Open it from Launchpad, or from Applications in your home folder in Finder."

@@ -14,7 +14,7 @@ pub struct ModelEntry {
     pub reasoning_strength: ReasoningStrength,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ReasoningStrength {
     /// Dedicated reasoning model trained with RL / CoT
     Dedicated,
@@ -246,54 +246,16 @@ fn params_from_name(name: &str) -> Option<f64> {
         .find_map(|t| t.strip_suffix(['B', 'b'])?.parse::<f64>().ok())
 }
 
+#[cfg(test)]
 fn all_models() -> impl Iterator<Item = &'static ModelEntry> {
     catalog().iter().chain(abliterated())
-}
-
-pub fn find_by_id(id: &str) -> Option<&'static ModelEntry> {
-    all_models().find(|m| m.id.eq_ignore_ascii_case(id))
-}
-
-/// Up to three catalog IDs closest to a mistyped one, best match first.
-pub fn suggest(query: &str) -> Vec<&'static str> {
-    let q = query.to_lowercase();
-    let mut scored: Vec<(f64, &'static str)> = all_models()
-        .map(|m| {
-            let name = m.display_name.to_lowercase();
-            let similarity = strsim::jaro_winkler(&q, m.id).max(strsim::jaro_winkler(&q, &name));
-            // A substring hit ("70b", "gpt-oss") always qualifies, but a
-            // near-identical ID still ranks above it.
-            let score = if m.id.contains(&q) || name.contains(&q) {
-                0.9 + 0.1 * similarity
-            } else {
-                similarity
-            };
-            (score, m.id)
-        })
-        .filter(|(score, _)| *score >= 0.85)
-        .collect();
-    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
-    scored.into_iter().take(3).map(|(_, id)| id).collect()
-}
-
-/// Like `find_by_id`, but the error suggests close matches.
-pub fn lookup(id: &str) -> anyhow::Result<&'static ModelEntry> {
-    find_by_id(id).ok_or_else(|| {
-        let mut msg = format!("Model '{id}' not found.");
-        let close = suggest(id);
-        if !close.is_empty() {
-            msg += &format!("\nDid you mean: {}?", close.join(", "));
-        }
-        msg += "\nRun 'model-downloader list' to see every model.";
-        anyhow::anyhow!(msg)
-    })
 }
 
 pub fn available_quants() -> &'static [&'static str] {
     &["Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0"]
 }
 
-/// One-line guidance shown next to each quant in the interactive menu.
+/// One-line guidance shown next to each quant.
 pub fn quant_note(quant: &str) -> &'static str {
     match quant {
         "Q3_K_M" => "smallest, noticeably lower quality",
@@ -323,7 +285,7 @@ impl ModelEntry {
     }
 }
 
-/// Catalog models from smallest to largest, the order the menus show them in.
+/// Catalog models from smallest to largest, the order the list shows them in.
 pub fn by_size() -> Vec<&'static ModelEntry> {
     let mut models: Vec<_> = catalog().iter().collect();
     models.sort_by(|a, b| a.size_gb_q4.total_cmp(&b.size_gb_q4));
@@ -354,26 +316,6 @@ mod tests {
     }
 
     #[test]
-    fn find_by_id_works() {
-        assert!(find_by_id("dsr1-distill-qwen-14b").is_some());
-        assert!(find_by_id("nonexistent").is_none());
-        assert!(find_by_id("Qwen3-14B").is_some(), "lookup ignores case");
-    }
-
-    #[test]
-    fn suggests_close_ids() {
-        assert_eq!(suggest("qwen-14b").first(), Some(&"qwen3-14b"));
-        assert_eq!(suggest("gpt-oss").len(), 3, "both sizes plus the abliterated one");
-        assert!(suggest("zzz").is_empty());
-    }
-
-    #[test]
-    fn lookup_error_mentions_suggestion() {
-        let err = lookup("qwen-14b").unwrap_err().to_string();
-        assert!(err.contains("Did you mean: qwen3-14b"), "{err}");
-    }
-
-    #[test]
     fn every_quant_has_a_note() {
         for q in available_quants() {
             assert!(!quant_note(q).is_empty(), "{q} has no note");
@@ -396,13 +338,6 @@ mod tests {
     fn abliterated_models_stay_out_of_the_normal_lists() {
         assert!(catalog().iter().chain(by_size()).all(|m| !is_abliterated(m)));
         assert!(abliterated().iter().all(is_abliterated));
-    }
-
-    #[test]
-    fn abliterated_models_can_be_found_by_id() {
-        let m = find_by_id("qwen3-8b-abliterated").expect("found");
-        assert!(is_abliterated(m));
-        assert!(!is_abliterated(find_by_id("qwen3-8b").unwrap()));
     }
 
     #[test]
